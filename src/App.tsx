@@ -29,6 +29,9 @@ import {
   onAuthStateChanged, 
   User as FirebaseUser,
   signInWithPopup,
+  signInWithEmailAndPassword,
+  createUserWithEmailAndPassword,
+  updateProfile,
   signOut
 } from 'firebase/auth';
 import { db, auth, rtdb, googleProvider } from './firebase';
@@ -369,6 +372,12 @@ export default function App() {
   const isIOS = typeof window !== 'undefined' && /iPad|iPhone|iPod/.test(navigator.userAgent) && !(window as any).MSStream;
   const [isStandalone, setIsStandalone] = useState(typeof window !== 'undefined' && (window.matchMedia('(display-mode: standalone)').matches || (window.navigator as any).standalone));
 
+  const [email, setEmail] = useState('');
+  const [password, setPassword] = useState('');
+  const [name, setName] = useState('');
+  const [isRegistering, setIsRegistering] = useState(false);
+  const [authError, setAuthError] = useState<string | null>(null);
+
   if (asyncError) throw asyncError;
 
   // --- Browser Notifications ---
@@ -699,11 +708,39 @@ export default function App() {
 
   // --- Actions ---
 
+  const handleEmailAuth = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setAuthError(null);
+    try {
+      if (isRegistering) {
+        const userCredential = await createUserWithEmailAndPassword(auth, email, password);
+        if (name.trim()) {
+          await updateProfile(userCredential.user, { displayName: name });
+          // Ensure the Firestore document gets the correct name
+          await setDoc(doc(db, 'users', userCredential.user.uid), {
+            uid: userCredential.user.uid,
+            email: userCredential.user.email || '',
+            displayName: name,
+            role: userCredential.user.email === 'frederickigang@gmail.com' ? 'admin' : 'user',
+            createdAt: Timestamp.now()
+          }, { merge: true });
+          
+          setProfile(prev => prev ? { ...prev, displayName: name } : null);
+        }
+      } else {
+        await signInWithEmailAndPassword(auth, email, password);
+      }
+    } catch (err: any) {
+      setAuthError(err.message || "Authentication failed.");
+    }
+  };
+
   const handleLogin = async () => {
+    setAuthError(null);
     try {
       await signInWithPopup(auth, googleProvider);
-    } catch (err) {
-      setAsyncError(new Error("Login failed. Please try again."));
+    } catch (err: any) {
+      setAuthError(err.message || "Google login failed. Please try again.");
     }
   };
 
@@ -1008,16 +1045,66 @@ export default function App() {
           <h1 className="text-2xl font-bold text-slate-800 mb-2">PolyKeyLock</h1>
           <p className="text-slate-500 mb-8">Smart Classroom Key Management System</p>
           
+          <form onSubmit={handleEmailAuth} className="space-y-4 mb-6">
+            {authError && <div className="p-3 bg-red-50 text-red-600 text-sm rounded-xl text-left">{authError}</div>}
+            {isRegistering && (
+              <input
+                type="text"
+                placeholder="Full Name"
+                value={name}
+                onChange={e => setName(e.target.value)}
+                className="w-full px-4 py-3 rounded-xl border border-slate-200 focus:border-indigo-500 focus:ring-2 focus:ring-indigo-200 outline-none transition-all"
+                required
+              />
+            )}
+            <input
+              type="email"
+              placeholder="Email address"
+              value={email}
+              onChange={e => setEmail(e.target.value)}
+              className="w-full px-4 py-3 rounded-xl border border-slate-200 focus:border-indigo-500 focus:ring-2 focus:ring-indigo-200 outline-none transition-all"
+              required
+            />
+            <input
+              type="password"
+              placeholder="Password"
+              value={password}
+              onChange={e => setPassword(e.target.value)}
+              className="w-full px-4 py-3 rounded-xl border border-slate-200 focus:border-indigo-500 focus:ring-2 focus:ring-indigo-200 outline-none transition-all"
+              required
+            />
+            <button
+              type="submit"
+              className="w-full bg-indigo-600 text-white py-3 rounded-xl font-bold hover:bg-indigo-700 transition-all"
+            >
+              {isRegistering ? 'Create Account' : 'Sign In'}
+            </button>
+          </form>
+
+          <div className="flex items-center gap-4 mb-6">
+            <div className="h-px bg-slate-200 flex-1" />
+            <span className="text-xs text-slate-400 font-medium uppercase tracking-wider">OR</span>
+            <div className="h-px bg-slate-200 flex-1" />
+          </div>
+
           <button 
             onClick={handleLogin}
-            className="w-full bg-slate-900 text-white py-4 rounded-2xl font-bold flex items-center justify-center gap-3 hover:bg-slate-800 transition-all active:scale-95"
+            type="button"
+            className="w-full bg-slate-900 text-white py-3 rounded-xl font-bold flex items-center justify-center gap-3 hover:bg-slate-800 transition-all active:scale-95"
           >
             <img src="https://www.gstatic.com/firebasejs/ui/2.0.0/images/auth/google.svg" className="w-5 h-5" alt="Google" />
             Sign in with Google
           </button>
           
-          <p className="mt-6 text-xs text-slate-400">
-            Secure access for authorized personnel only.
+          <p className="mt-6 text-sm text-slate-600">
+            {isRegistering ? 'Already have an account?' : "Don't have an account?"}{' '}
+            <button
+              type="button"
+              onClick={() => setIsRegistering(!isRegistering)}
+              className="text-indigo-600 font-bold hover:underline"
+            >
+              {isRegistering ? 'Sign In' : 'Register'}
+            </button>
           </p>
         </motion.div>
       </div>
