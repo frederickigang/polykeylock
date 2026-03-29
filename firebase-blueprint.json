@@ -1,0 +1,99 @@
+{
+  "entities": {
+    "User": {
+      "title": "User",
+      "description": "User profile and role information.",
+      "type": "object",
+      "properties": {
+        "uid": { "type": "string", "description": "The unique identifier for the user." },
+        "email": { "type": "string", "description": "The user's email address." },
+        "displayName": { "type": "string", "description": "The user's display name." },
+        "role": { "type": "string", "enum": ["admin", "user"], "description": "The user's role." },
+        "createdAt": { "type": "string", "format": "date-time", "description": "When the user was created." }
+      },
+      "required": ["uid", "email", "role"]
+    },
+    "Key": {
+      "title": "Key",
+      "description": "Information about a classroom key.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "description": "The unique identifier for the key." },
+        "uid": { "type": "string", "description": "The hardware UID of the key (e.g., RFID UID)." },
+        "name": { "type": "string", "description": "The name of the room the key belongs to." },
+        "status": { "type": "string", "enum": ["available", "checked_out", "missing"], "description": "The current status of the key." },
+        "currentHolderId": { "type": "string", "description": "The UID of the user currently holding the key." },
+        "currentHolderName": { "type": "string", "description": "The name of the user currently holding the key." },
+        "lastUpdated": { "type": "string", "format": "date-time", "description": "When the key status was last updated." }
+      },
+      "required": ["id", "uid", "name", "status"]
+    },
+    "Booking": {
+      "title": "Booking",
+      "description": "A reservation for a key.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "description": "The unique identifier for the booking." },
+        "keyId": { "type": "string", "description": "The ID of the key being booked." },
+        "userId": { "type": "string", "description": "The UID of the user making the booking." },
+        "userName": { "type": "string", "description": "The name of the user making the booking." },
+        "startTime": { "type": "string", "format": "date-time", "description": "When the booking starts." },
+        "endTime": { "type": "string", "format": "date-time", "description": "When the booking ends." },
+        "status": { "type": "string", "enum": ["pending", "active", "completed", "cancelled"], "description": "The status of the booking." }
+      },
+      "required": ["id", "keyId", "userId", "startTime", "endTime", "status"]
+    },
+    "Report": {
+      "title": "Report",
+      "description": "A report for a missing key.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "description": "The unique identifier for the report." },
+        "keyId": { "type": "string", "description": "The ID of the key being reported." },
+        "keyName": { "type": "string", "description": "The name of the key being reported." },
+        "userId": { "type": "string", "description": "The UID of the user making the report." },
+        "userName": { "type": "string", "description": "The name of the user making the report." },
+        "description": { "type": "string", "description": "Details about the missing key." },
+        "createdAt": { "type": "string", "format": "date-time", "description": "When the report was created." },
+        "status": { "type": "string", "enum": ["pending", "resolved"], "description": "The status of the report." }
+      },
+      "required": ["id", "keyId", "userId", "createdAt", "status"]
+    },
+    "Notification": {
+      "title": "Notification",
+      "description": "A notification for a user.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "description": "The unique identifier for the notification." },
+        "userId": { "type": "string", "description": "The UID of the user receiving the notification." },
+        "message": { "type": "string", "description": "The notification message." },
+        "type": { "type": "string", "enum": ["info", "warning", "alert"], "description": "The type of notification." },
+        "createdAt": { "type": "string", "format": "date-time", "description": "When the notification was created." },
+        "read": { "type": "boolean", "description": "Whether the notification has been read." }
+      },
+      "required": ["id", "userId", "message", "type", "createdAt", "read"]
+    },
+    "Transaction": {
+      "title": "Transaction",
+      "description": "A record of a key being taken or returned.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "description": "The unique identifier for the transaction." },
+        "keyId": { "type": "string", "description": "The ID of the key involved." },
+        "userId": { "type": "string", "description": "The UID of the user involved." },
+        "userName": { "type": "string", "description": "The name of the user involved." },
+        "action": { "type": "string", "enum": ["checkout", "return"], "description": "The action performed." },
+        "timestamp": { "type": "string", "format": "date-time", "description": "When the transaction occurred." }
+      },
+      "required": ["id", "keyId", "userId", "action", "timestamp"]
+    }
+  },
+  "firestore": {
+    "/users/{uid}": { "schema": "User", "description": "User profiles." },
+    "/keys/{keyId}": { "schema": "Key", "description": "Classroom keys." },
+    "/bookings/{bookingId}": { "schema": "Booking", "description": "Key bookings." },
+    "/reports/{reportId}": { "schema": "Report", "description": "Missing key reports." },
+    "/notifications/{notificationId}": { "schema": "Notification", "description": "User notifications." },
+    "/transactions/{transactionId}": { "schema": "Transaction", "description": "Key transactions." }
+  }
+}

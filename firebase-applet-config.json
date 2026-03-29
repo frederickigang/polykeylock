@@ -1,0 +1,11 @@
+{
+  "projectId": "cabinet-polykeylock",
+  "appId": "1:1061381775425:web:974333b350ca022732a6c0",
+  "apiKey": "AIzaSyD3veKFEUcHXxAruEP7_ErDqZ08GsRoXJc",
+  "authDomain": "cabinet-polykeylock.firebaseapp.com",
+  "databaseURL": "https://cabinet-polykeylock-default-rtdb.asia-southeast1.firebasedatabase.app/",
+  "firestoreDatabaseId": "ai-studio-a3da7e7f-08a5-40af-9830-44db5eb71049",
+  "storageBucket": "cabinet-polykeylock.firebasestorage.app",
+  "messagingSenderId": "1061381775425",
+  "measurementId": ""
+}

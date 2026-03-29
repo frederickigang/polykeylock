@@ -1,0 +1,203 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // ===============================================================
+    // Assumed Data Model
+    // ===============================================================
+    //
+    // Collection: users
+    // Document ID: {uid}
+    // Fields:
+    //   - uid: string (required)
+    //   - email: string (required)
+    //   - displayName: string (optional)
+    //   - role: string (required, enum: ["admin", "user"])
+    //   - createdAt: timestamp (required)
+    //
+    // Collection: keys
+    // Document ID: {keyId}
+    // Fields:
+    //   - id: string (required)
+    //   - name: string (required)
+    //   - status: string (required, enum: ["available", "checked_out", "missing"])
+    //   - currentHolderId: string (optional)
+    //   - currentHolderName: string (optional)
+    //   - lastUpdated: timestamp (required)
+    //
+    // Collection: bookings
+    // Document ID: {bookingId}
+    // Fields:
+    //   - id: string (required)
+    //   - keyId: string (required)
+    //   - userId: string (required)
+    //   - userName: string (required)
+    //   - startTime: timestamp (required)
+    //   - endTime: timestamp (required)
+    //   - status: string (required, enum: ["pending", "active", "completed", "cancelled"])
+    //
+    // Collection: reports
+    // Document ID: {reportId}
+    // Fields:
+    //   - id: string (required)
+    //   - keyId: string (required)
+    //   - keyName: string (required)
+    //   - userId: string (required)
+    //   - userName: string (required)
+    //   - description: string (required)
+    //   - createdAt: timestamp (required)
+    //   - status: string (required, enum: ["pending", "resolved"])
+    //
+    // Collection: notifications
+    // Document ID: {notificationId}
+    // Fields:
+    //   - id: string (required)
+    //   - userId: string (required)
+    //   - message: string (required)
+    //   - type: string (required, enum: ["info", "warning", "alert"])
+    //   - createdAt: timestamp (required)
+    //   - read: bool (required)
+    //
+    // Collection: transactions
+    // Document ID: {transactionId}
+    // Fields:
+    //   - id: string (required)
+    //   - keyId: string (required)
+    //   - userId: string (required)
+    //   - userName: string (required)
+    //   - action: string (required, enum: ["checkout", "return"])
+    //   - timestamp: timestamp (required)
+    //
+    // ===============================================================
+
+    // ===============================================================
+    // Helper Functions
+    // ===============================================================
+
+    function isAuthenticated() {
+      return request.auth != null;
+    }
+
+    function isOwner(userId) {
+      return isAuthenticated() && request.auth.uid == userId;
+    }
+
+    function isAdmin() {
+      return isAuthenticated() &&
+        ((exists(/databases/$(database)/documents/users/$(request.auth.uid)) && 
+          get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role == 'admin') ||
+          (request.auth.token.email == "frederickigang@gmail.com" && request.auth.token.email_verified == true));
+    }
+
+    function isValidUser(data) {
+      return data.keys().hasAll(['uid', 'email', 'role', 'createdAt']) &&
+             data.uid is string && data.uid.size() > 0 && data.uid.size() < 128 &&
+             data.email is string && data.email.size() > 0 && data.email.size() < 256 &&
+             data.role in ['admin', 'user'] &&
+             data.createdAt is timestamp;
+    }
+
+    function isValidKey(data) {
+      return data.keys().hasAll(['id', 'uid', 'name', 'status', 'lastUpdated']) &&
+             data.id is string && data.id.size() > 0 &&
+             data.uid is string && data.uid.size() > 0 && data.uid.size() < 128 &&
+             data.name is string && data.name.size() > 0 && data.name.size() < 100 &&
+             data.status in ['available', 'checked_out', 'missing'] &&
+             data.lastUpdated is timestamp &&
+             (!('expectedReturnTime' in data) || data.expectedReturnTime is timestamp);
+    }
+
+    function isValidBooking(data) {
+      return data.keys().hasAll(['id', 'keyId', 'userId', 'userName', 'startTime', 'endTime', 'status']) &&
+             data.id is string && data.id.size() > 0 &&
+             data.keyId is string && data.keyId.size() > 0 &&
+             data.userId is string && data.userId.size() > 0 &&
+             data.userName is string && data.userName.size() > 0 &&
+             data.startTime is timestamp &&
+             data.endTime is timestamp &&
+             data.status in ['pending', 'active', 'completed', 'cancelled'];
+    }
+
+    function isValidReport(data) {
+      return data.keys().hasAll(['id', 'keyId', 'keyName', 'userId', 'userName', 'description', 'createdAt', 'status']) &&
+             data.id is string && data.id.size() > 0 &&
+             data.keyId is string && data.keyId.size() > 0 &&
+             data.keyName is string && data.keyName.size() > 0 &&
+             data.userId is string && data.userId.size() > 0 &&
+             data.userName is string && data.userName.size() > 0 &&
+             data.description is string && data.description.size() > 0 && data.description.size() < 1000 &&
+             data.createdAt is timestamp &&
+             data.status in ['pending', 'resolved'];
+    }
+
+    function isValidNotification(data) {
+      return data.keys().hasAll(['id', 'userId', 'message', 'type', 'createdAt', 'read']) &&
+             data.id is string && data.id.size() > 0 &&
+             data.userId is string && data.userId.size() > 0 &&
+             data.message is string && data.message.size() > 0 && data.message.size() < 500 &&
+             data.type in ['info', 'warning', 'alert'] &&
+             data.createdAt is timestamp &&
+             data.read is bool;
+    }
+
+    function isValidTransaction(data) {
+      return data.keys().hasAll(['id', 'keyId', 'userId', 'userName', 'action', 'timestamp']) &&
+             data.id is string && data.id.size() > 0 &&
+             data.keyId is string && data.keyId.size() > 0 &&
+             data.userId is string && data.userId.size() > 0 &&
+             data.userName is string && data.userName.size() > 0 &&
+             data.action in ['checkout', 'return'] &&
+             data.timestamp is timestamp &&
+             (!('durationMinutes' in data) || data.durationMinutes is int);
+    }
+
+    // ===============================================================
+    // Collection Rules
+    // ===============================================================
+
+    match /users/{uid} {
+      allow read: if isAuthenticated() && (isOwner(uid) || isAdmin());
+      allow create: if isAuthenticated() && isValidUser(request.resource.data) && (isOwner(uid) || isAdmin());
+      allow update: if isAuthenticated() && isValidUser(request.resource.data) && (
+        (isAdmin() && (uid != request.auth.uid || request.resource.data.role == resource.data.role)) ||
+        (isOwner(uid) && request.resource.data.role == resource.data.role)
+      );
+      allow delete: if isAdmin() && uid != request.auth.uid;
+    }
+
+    match /keys/{keyId} {
+      allow read: if isAuthenticated();
+      allow create: if isAdmin() && isValidKey(request.resource.data);
+      allow update: if isAuthenticated() && isValidKey(request.resource.data) && (isAdmin() || (request.resource.data.diff(resource.data).affectedKeys().hasOnly(['status', 'currentHolderId', 'currentHolderName', 'lastUpdated'])));
+      allow delete: if isAdmin();
+    }
+
+    match /bookings/{bookingId} {
+      allow read: if isAuthenticated();
+      allow create: if isAuthenticated() && isValidBooking(request.resource.data) && (isOwner(request.resource.data.userId) || isAdmin());
+      allow update: if isAuthenticated() && isValidBooking(request.resource.data) && (isOwner(resource.data.userId) || isAdmin());
+      allow delete: if isAdmin();
+    }
+
+    match /reports/{reportId} {
+      allow read: if isAdmin() || (isAuthenticated() && isOwner(resource.data.userId));
+      allow create: if isAuthenticated() && isValidReport(request.resource.data) && isOwner(request.resource.data.userId);
+      allow update: if isAdmin() && isValidReport(request.resource.data);
+      allow delete: if isAdmin();
+    }
+
+    match /notifications/{notificationId} {
+      allow read: if isAuthenticated() && isOwner(resource.data.userId);
+      allow create: if isAdmin() && isValidNotification(request.resource.data);
+      allow update: if isAuthenticated() && isOwner(resource.data.userId) && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['read']);
+      allow delete: if isAdmin() || (isAuthenticated() && isOwner(resource.data.userId));
+    }
+
+    match /transactions/{transactionId} {
+      allow read: if isAuthenticated();
+      allow create: if isAuthenticated() && isValidTransaction(request.resource.data) && (isOwner(request.resource.data.userId) || isAdmin());
+      allow update: if false; // Transactions are immutable
+      allow delete: if isAdmin();
+    }
+  }
+}
