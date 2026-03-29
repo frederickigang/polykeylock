@@ -13,7 +13,7 @@ self.addEventListener('push', (event) => {
     icon: 'https://ais-dev-zhtasfoudfs3j5dd5e3ubf-245341165106.asia-east1.run.app/favicon.ico',
     badge: 'https://ais-dev-zhtasfoudfs3j5dd5e3ubf-245341165106.asia-east1.run.app/favicon.ico'
   };
-  event.waitUntil(self.notificationClick(data.title, options));
+  event.waitUntil(self.registration.showNotification(data.title, options));
 });
 
 self.addEventListener('notificationclick', (event) => {

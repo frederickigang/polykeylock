@@ -1,4 +1,4 @@
-import React, { useEffect, useState, useCallback } from 'react';
+import React, { Component, useEffect, useState, useCallback } from 'react';
 import { 
   ref as rtdbRef, 
   onValue as onRtdbValue, 
@@ -167,7 +167,7 @@ interface Transaction {
 
 // --- Error Handling ---
 
-function handleFirestoreError(error: unknown, operationType: OperationType, path: string | null) {
+function handleFirestoreError(error: unknown, operationType: OperationType, path: string | null, setError?: (err: any) => void) {
   const errInfo: FirestoreErrorInfo = {
     error: error instanceof Error ? error.message : String(error),
     authInfo: {
@@ -187,7 +187,12 @@ function handleFirestoreError(error: unknown, operationType: OperationType, path
     path
   }
   console.error('Firestore Error: ', JSON.stringify(errInfo));
-  throw new Error(JSON.stringify(errInfo));
+  const finalError = new Error(JSON.stringify(errInfo));
+  if (setError) {
+    setError(finalError);
+  } else {
+    throw finalError;
+  }
 }
 
 // --- Components ---
@@ -280,6 +285,67 @@ function CountdownTimer({ targetTime }: { targetTime: Timestamp }) {
   return <span className="font-mono text-indigo-600 font-bold">{timeLeft}</span>;
 }
 
+// --- Error Boundary ---
+
+interface ErrorBoundaryProps {
+  children: React.ReactNode;
+}
+
+interface ErrorBoundaryState {
+  hasError: boolean;
+  error: any;
+}
+
+export class ErrorBoundary extends Component<ErrorBoundaryProps, ErrorBoundaryState> {
+  state: ErrorBoundaryState = { hasError: false, error: null };
+  props: ErrorBoundaryProps;
+
+  constructor(props: ErrorBoundaryProps) {
+    super(props);
+    this.props = props;
+  }
+
+  static getDerivedStateFromError(error: any) {
+    return { hasError: true, error };
+  }
+
+  componentDidCatch(error: any, errorInfo: any) {
+    console.error("ErrorBoundary caught an error:", error, errorInfo);
+  }
+
+  render() {
+    if (this.state.hasError) {
+      let errorMessage = "Something went wrong.";
+      try {
+        const errorInfo = JSON.parse(this.state.error.message);
+        errorMessage = `Firestore Error: ${errorInfo.error} during ${errorInfo.operationType} on ${errorInfo.path}`;
+      } catch (e) {
+        errorMessage = this.state.error?.message || String(this.state.error);
+      }
+
+      return (
+        <div className="min-h-screen bg-slate-50 flex items-center justify-center p-6">
+          <div className="max-w-md w-full bg-white rounded-3xl p-8 shadow-xl border border-red-100 text-center">
+            <div className="bg-red-50 w-16 h-16 rounded-2xl flex items-center justify-center mx-auto mb-6">
+              <ShieldAlert className="w-8 h-8 text-red-600" />
+            </div>
+            <h1 className="text-xl font-bold text-slate-800 mb-2">Application Error</h1>
+            <p className="text-slate-500 text-sm mb-6">{errorMessage}</p>
+            <button 
+              onClick={() => window.location.reload()}
+              className="w-full bg-indigo-600 text-white py-4 rounded-2xl font-bold hover:bg-indigo-700 transition-all"
+            >
+              Reload Application
+            </button>
+          </div>
+        </div>
+      );
+    }
+
+    return this.props.children;
+  }
+}
+
 export default function App() {
   const [user, setUser] = useState<FirebaseUser | null>(null);
   const [profile, setProfile] = useState<UserProfile | null>(null);
@@ -294,14 +360,16 @@ export default function App() {
   const [loading, setLoading] = useState(true);
   const [activeTab, setActiveTab] = useState('dashboard');
   const [isAuthReady, setIsAuthReady] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  const [asyncError, setAsyncError] = useState<any>(null);
   const [historyDate, setHistoryDate] = useState<string>(new Date().toISOString().split('T')[0]);
   const [showNotifications, setShowNotifications] = useState(false);
   const [notificationPermission, setNotificationPermission] = useState<NotificationPermission>(
-    typeof window !== 'undefined' ? Notification.permission : 'default'
+    typeof window !== 'undefined' && 'Notification' in window ? Notification.permission : 'default'
   );
   const isIOS = typeof window !== 'undefined' && /iPad|iPhone|iPod/.test(navigator.userAgent) && !(window as any).MSStream;
-  const isStandalone = typeof window !== 'undefined' && (window.matchMedia('(display-mode: standalone)').matches || (window.navigator as any).standalone);
+  const [isStandalone, setIsStandalone] = useState(typeof window !== 'undefined' && (window.matchMedia('(display-mode: standalone)').matches || (window.navigator as any).standalone));
+
+  if (asyncError) throw asyncError;
 
   // --- Browser Notifications ---
   const requestNotificationPermission = useCallback(async () => {
@@ -331,7 +399,7 @@ export default function App() {
       } catch (error) {
         if(error instanceof Error && error.message.includes('the client is offline')) {
           console.error("Please check your Firebase configuration. ");
-          setError("Firebase is offline. Please check your configuration.");
+          setAsyncError(new Error("Firebase is offline. Please check your configuration."));
         }
         // Skip logging for other errors, as this is simply a connection test.
       }
@@ -344,8 +412,8 @@ export default function App() {
   useEffect(() => {
     const unsubscribe = onAuthStateChanged(auth, async (firebaseUser) => {
       setUser(firebaseUser);
-      if (firebaseUser) {
-        try {
+      try {
+        if (firebaseUser) {
           const userDoc = await getDoc(doc(db, 'users', firebaseUser.uid));
           if (userDoc.exists()) {
             setProfile(userDoc.data() as UserProfile);
@@ -368,13 +436,14 @@ export default function App() {
               'info'
             );
           }
-        } catch (err) {
-          handleFirestoreError(err, OperationType.GET, `users/${firebaseUser.uid}`);
+        } else {
+          setProfile(null);
         }
-      } else {
-        setProfile(null);
+      } catch (err) {
+        handleFirestoreError(err, OperationType.GET, firebaseUser ? `users/${firebaseUser.uid}` : 'auth', setAsyncError);
+      } finally {
+        setIsAuthReady(true);
       }
-      setIsAuthReady(true);
     });
     return unsubscribe;
   }, []);
@@ -390,7 +459,7 @@ export default function App() {
     const unsubscribeKeys = onSnapshot(collection(db, 'keys'), (snapshot) => {
       setKeys(snapshot.docs.map(doc => ({ ...doc.data(), id: doc.id } as KeyData)));
       setLoading(false);
-    }, (err) => handleFirestoreError(err, OperationType.LIST, 'keys'));
+    }, (err) => handleFirestoreError(err, OperationType.LIST, 'keys', setAsyncError));
 
     // Bookings
     const bookingsQuery = profile.role === 'admin' 
@@ -399,7 +468,7 @@ export default function App() {
     
     const unsubscribeBookings = onSnapshot(bookingsQuery, (snapshot) => {
       setBookings(snapshot.docs.map(doc => ({ ...doc.data(), id: doc.id } as Booking)));
-    }, (err) => handleFirestoreError(err, OperationType.LIST, 'bookings'));
+    }, (err) => handleFirestoreError(err, OperationType.LIST, 'bookings', setAsyncError));
 
     // Reports
     const reportsQuery = profile.role === 'admin'
@@ -408,7 +477,7 @@ export default function App() {
 
     const unsubscribeReports = onSnapshot(reportsQuery, (snapshot) => {
       setReports(snapshot.docs.map(doc => ({ ...doc.data(), id: doc.id } as Report)));
-    }, (err) => handleFirestoreError(err, OperationType.LIST, 'reports'));
+    }, (err) => handleFirestoreError(err, OperationType.LIST, 'reports', setAsyncError));
 
     // Notifications
     const notificationsQuery = query(collection(db, 'notifications'), where('userId', '==', user.uid), orderBy('createdAt', 'desc'));
@@ -417,7 +486,7 @@ export default function App() {
       const newNotifications = snapshot.docs.map(doc => ({ ...doc.data(), id: doc.id } as Notification));
       
       // Browser Notification for new unread alerts
-      if (!isInitialLoad && Notification.permission === 'granted') {
+      if (!isInitialLoad && 'Notification' in window && Notification.permission === 'granted') {
         snapshot.docChanges().forEach((change) => {
           if (change.type === 'added') {
             const notif = change.doc.data() as Notification;
@@ -435,14 +504,14 @@ export default function App() {
       
       setNotifications(newNotifications);
       isInitialLoad = false;
-    }, (err) => handleFirestoreError(err, OperationType.LIST, 'notifications'));
+    }, (err) => handleFirestoreError(err, OperationType.LIST, 'notifications', setAsyncError));
 
     // Transactions (Admin only)
     // Transactions
     const transactionsQuery = query(collection(db, 'transactions'), orderBy('timestamp', 'desc'), limit(100));
     const unsubscribeTransactions = onSnapshot(transactionsQuery, (snapshot) => {
       setTransactions(snapshot.docs.map(doc => ({ ...doc.data(), id: doc.id } as Transaction)));
-    }, (err) => handleFirestoreError(err, OperationType.LIST, 'transactions'));
+    }, (err) => handleFirestoreError(err, OperationType.LIST, 'transactions', setAsyncError));
 
     // Users (Admin only)
     let unsubscribeUsers: (() => void) | undefined;
@@ -450,7 +519,7 @@ export default function App() {
       const usersQuery = query(collection(db, 'users'), orderBy('displayName', 'asc'));
       unsubscribeUsers = onSnapshot(usersQuery, (snapshot) => {
         setUsers(snapshot.docs.map(doc => ({ ...doc.data(), uid: doc.id } as UserProfile)));
-      }, (err) => handleFirestoreError(err, OperationType.LIST, 'users'));
+      }, (err) => handleFirestoreError(err, OperationType.LIST, 'users', setAsyncError));
     }
 
     // RTDB Current Transaction
@@ -634,7 +703,7 @@ export default function App() {
     try {
       await signInWithPopup(auth, googleProvider);
     } catch (err) {
-      setError("Login failed. Please try again.");
+      setAsyncError(new Error("Login failed. Please try again."));
     }
   };
 
@@ -642,7 +711,7 @@ export default function App() {
     try {
       await signOut(auth);
     } catch (err) {
-      setError("Logout failed.");
+      setAsyncError(new Error("Logout failed."));
     }
   };
 
@@ -724,7 +793,7 @@ export default function App() {
         await markNotificationRead(alertNotif.id);
       }
     } catch (err) {
-      handleFirestoreError(err, OperationType.UPDATE, `keys/${showExtensionModal}`);
+      handleFirestoreError(err, OperationType.UPDATE, `keys/${showExtensionModal}`, setAsyncError);
     }
   };
 
@@ -755,7 +824,7 @@ export default function App() {
       });
       setShowBookingModal(null);
     } catch (err) {
-      handleFirestoreError(err, OperationType.CREATE, 'bookings');
+      handleFirestoreError(err, OperationType.CREATE, 'bookings', setAsyncError);
     }
   };
 
@@ -794,7 +863,7 @@ export default function App() {
 
       setShowReportModal(null);
     } catch (err) {
-      handleFirestoreError(err, OperationType.CREATE, 'reports');
+      handleFirestoreError(err, OperationType.CREATE, 'reports', setAsyncError);
     }
   };
 
@@ -835,7 +904,7 @@ export default function App() {
 
       setShowAdminKeyModal(null);
     } catch (err) {
-      handleFirestoreError(err, OperationType.UPDATE, `keys/${keyId}`);
+      handleFirestoreError(err, OperationType.UPDATE, `keys/${keyId}`, setAsyncError);
     }
   };
 
@@ -843,7 +912,7 @@ export default function App() {
     try {
       await updateDoc(doc(db, 'notifications', id), { read: true });
     } catch (err) {
-      handleFirestoreError(err, OperationType.UPDATE, `notifications/${id}`);
+      handleFirestoreError(err, OperationType.UPDATE, `notifications/${id}`, setAsyncError);
     }
   };
 
@@ -852,7 +921,7 @@ export default function App() {
     try {
       await deleteDoc(doc(db, 'bookings', id));
     } catch (err) {
-      handleFirestoreError(err, OperationType.DELETE, `bookings/${id}`);
+      handleFirestoreError(err, OperationType.DELETE, `bookings/${id}`, setAsyncError);
     }
   };
 
@@ -861,7 +930,7 @@ export default function App() {
     try {
       await updateDoc(doc(db, 'bookings', id), { status });
     } catch (err) {
-      handleFirestoreError(err, OperationType.UPDATE, `bookings/${id}`);
+      handleFirestoreError(err, OperationType.UPDATE, `bookings/${id}`, setAsyncError);
     }
   };
 
@@ -870,7 +939,7 @@ export default function App() {
     try {
       await updateDoc(doc(db, 'reports', id), { status });
     } catch (err) {
-      handleFirestoreError(err, OperationType.UPDATE, `reports/${id}`);
+      handleFirestoreError(err, OperationType.UPDATE, `reports/${id}`, setAsyncError);
     }
   };
 
@@ -899,7 +968,7 @@ export default function App() {
       await updateDoc(doc(db, 'users', targetUid), { role: newRole });
       addNotification(user!.uid, `User role updated to ${newRole}`, 'info');
     } catch (err) {
-      handleFirestoreError(err, OperationType.UPDATE, `users/${targetUid}`);
+      handleFirestoreError(err, OperationType.UPDATE, `users/${targetUid}`, setAsyncError);
     }
   };
 
@@ -908,7 +977,7 @@ export default function App() {
     try {
       await deleteDoc(doc(db, 'transactions', id));
     } catch (err) {
-      handleFirestoreError(err, OperationType.DELETE, `transactions/${id}`);
+      handleFirestoreError(err, OperationType.DELETE, `transactions/${id}`, setAsyncError);
     }
   };
 
