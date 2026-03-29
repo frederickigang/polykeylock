@@ -188,7 +188,7 @@ service cloud.firestore {
 
     match /notifications/{notificationId} {
       allow read: if isAuthenticated() && isOwner(resource.data.userId);
-      allow create: if isAdmin() && isValidNotification(request.resource.data);
+      allow create: if isAuthenticated() && isValidNotification(request.resource.data);
       allow update: if isAuthenticated() && isOwner(resource.data.userId) && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['read']);
       allow delete: if isAdmin() || (isAuthenticated() && isOwner(resource.data.userId));
     }

@@ -570,6 +570,9 @@ export default function App() {
             if (pendingTransaction && pendingTransaction.expectedUID === key.uid && pendingTransaction.action === 'checkout') {
               inferredHolderId = pendingTransaction.userId;
               inferredHolderName = pendingTransaction.userName;
+            } else if (key.status === 'checked_out') {
+              inferredHolderId = key.currentHolderId || null;
+              inferredHolderName = key.currentHolderName || null;
             }
           }
 
@@ -620,13 +623,11 @@ export default function App() {
                 if (rtdbKey.status === 'available') {
                   const pendingBookings = bookings.filter(b => b.keyId === key.id && b.status === 'pending');
                   for (const booking of pendingBookings) {
-                    await addDoc(collection(db, 'notifications'), {
-                      userId: booking.userId,
-                      message: `The key for ${key.name} is now available!`,
-                      type: 'info',
-                      createdAt: timestamp,
-                      read: false
-                    });
+                    await addNotification(
+                      booking.userId,
+                      `The key for ${key.name} is now available!`,
+                      'info'
+                    );
                   }
                 }
 
@@ -634,13 +635,11 @@ export default function App() {
                 if (rtdbKey.status === 'missing') {
                   const affectedBookings = bookings.filter(b => b.keyId === key.id && (b.status === 'pending' || b.status === 'active'));
                   for (const booking of affectedBookings) {
-                    await addDoc(collection(db, 'notifications'), {
-                      userId: booking.userId,
-                      message: `Alert: The key for ${key.name} has been marked as missing. Your booking may be affected.`,
-                      type: 'warning',
-                      createdAt: timestamp,
-                      read: false
-                    });
+                    await addNotification(
+                      booking.userId,
+                      `Alert: The key for ${key.name} has been marked as missing. Your booking may be affected.`,
+                      'warning'
+                    );
                   }
                 }
               }
@@ -668,13 +667,11 @@ export default function App() {
         if (booking.endTime.toMillis() < now.toMillis()) {
           const alreadyNotified = notifications.some(n => n.type === 'warning' && n.message.includes(booking.id));
           if (!alreadyNotified) {
-            await addDoc(collection(db, 'notifications'), {
-              userId: user.uid,
-              message: `Warning: You have not returned the key for ${keys.find(k => k.id === booking.keyId)?.name}. Booking ID: ${booking.id}`,
-              type: 'warning',
-              createdAt: now,
-              read: false
-            });
+            await addNotification(
+              user.uid,
+              `Warning: You have not returned the key for ${keys.find(k => k.id === booking.keyId)?.name}. Booking ID: ${booking.id}`,
+              'warning'
+            );
           }
         }
       }
@@ -689,13 +686,11 @@ export default function App() {
           if (timeUntilReturn > 0 && timeUntilReturn < 300000) {
             const alreadyNotified = notifications.some(n => n.type === 'alert' && n.message.includes(`extend_${key.id}`));
             if (!alreadyNotified) {
-              await addDoc(collection(db, 'notifications'), {
-                userId: user.uid,
-                message: `Your time with the ${key.name} key is almost up! Would you like to extend? [extend_${key.id}]`,
-                type: 'alert',
-                createdAt: now,
-                read: false
-              });
+              await addNotification(
+                user.uid,
+                `Your time with the ${key.name} key is almost up! Would you like to extend? [extend_${key.id}]`,
+                'alert'
+              );
             }
           }
         }
@@ -889,13 +884,11 @@ export default function App() {
       // Notify users with active or pending bookings
       const affectedBookings = bookings.filter(b => b.keyId === keyId && (b.status === 'pending' || b.status === 'active'));
       for (const booking of affectedBookings) {
-        await addDoc(collection(db, 'notifications'), {
-          userId: booking.userId,
-          message: `Alert: The key for ${keyName} has been reported missing. Your booking may be affected.`,
-          type: 'warning',
-          createdAt: Timestamp.now(),
-          read: false
-        });
+        await addNotification(
+          booking.userId,
+          `Alert: The key for ${keyName} has been reported missing. Your booking may be affected.`,
+          'warning'
+        );
       }
 
       setShowReportModal(null);
@@ -982,8 +975,9 @@ export default function App() {
 
   const addNotification = async (userId: string, message: string, type: 'info' | 'warning' | 'alert' = 'info') => {
     try {
-      await addDoc(collection(db, 'notifications'), {
-        id: doc(collection(db, 'notifications')).id,
+      const newId = doc(collection(db, 'notifications')).id;
+      await setDoc(doc(db, 'notifications', newId), {
+        id: newId,
         userId,
         message,
         type,
@@ -1863,7 +1857,7 @@ export default function App() {
           </Modal>
         )}
 
-        {pendingTransaction?.isPending && (
+        {pendingTransaction?.isPending && pendingTransaction.userId === user?.uid && (
           <Modal onClose={cancelTransaction} title="Hardware Transaction">
             <div className="text-center py-8">
               <div className="bg-indigo-50 w-16 h-16 rounded-full flex items-center justify-center mx-auto mb-4 animate-pulse">
