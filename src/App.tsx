@@ -567,12 +567,14 @@ export default function App() {
           let inferredHolderName = rtdbKey.currentHolderName || null;
 
           if (rtdbKey.status === 'checked_out' && !inferredHolderId) {
-            if (pendingTransaction && pendingTransaction.expectedUID === key.uid && pendingTransaction.action === 'checkout') {
-              inferredHolderId = pendingTransaction.userId;
-              inferredHolderName = pendingTransaction.userName;
-            } else if (key.status === 'checked_out') {
+            if (key.status === 'checked_out') {
+              // Key was already checked out, keep the existing holder
               inferredHolderId = key.currentHolderId || null;
               inferredHolderName = key.currentHolderName || null;
+            } else if (pendingTransaction && pendingTransaction.expectedUID === key.uid) {
+              // Key just became checked out, infer from pending transaction even if canceled
+              inferredHolderId = pendingTransaction.userId || null;
+              inferredHolderName = pendingTransaction.userName || null;
             }
           }
 
@@ -641,6 +643,15 @@ export default function App() {
                       'warning'
                     );
                   }
+                }
+
+                // Clear current transaction if it was for this key
+                if (pendingTransaction && pendingTransaction.expectedUID === key.uid) {
+                  await setRtdbValue(rtdbRef(rtdb, 'currentTransaction'), {
+                    action: 'none',
+                    expectedUID: 'none',
+                    isPending: false
+                  });
                 }
               }
             } catch (err) {
@@ -833,8 +844,10 @@ export default function App() {
     try {
       await setRtdbValue(rtdbRef(rtdb, 'currentTransaction'), {
         action: 'none',
-        expectedUID: 'none',
-        isPending: false
+        expectedUID: pendingTransaction?.expectedUID || 'none',
+        isPending: false,
+        userId: pendingTransaction?.userId || null,
+        userName: pendingTransaction?.userName || null
       });
     } catch (err) {
       console.error("Error cancelling transaction:", err);
