@@ -1,4 +1,4 @@
-import React, { Component, useEffect, useState, useCallback } from 'react';
+import React, { Component, useEffect, useState, useCallback, useRef } from 'react';
 import { 
   ref as rtdbRef, 
   onValue as onRtdbValue, 
@@ -23,7 +23,8 @@ import {
   Timestamp,
   deleteDoc,
   getDocFromServer,
-  deleteField
+  deleteField,
+  runTransaction
 } from 'firebase/firestore';
 import { 
   onAuthStateChanged, 
@@ -31,6 +32,7 @@ import {
   signInWithPopup,
   signInWithEmailAndPassword,
   createUserWithEmailAndPassword,
+  sendPasswordResetEmail,
   updateProfile,
   signOut
 } from 'firebase/auth';
@@ -64,7 +66,10 @@ import {
   CheckCircle,
   Users,
   UserMinus,
-  UserPlus
+  UserPlus,
+  KeyRound,
+  Eye,
+  EyeOff
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { cn } from './lib/utils';
@@ -105,6 +110,8 @@ interface UserProfile {
   displayName: string;
   role: 'admin' | 'user';
   createdAt: Timestamp;
+  deleted?: boolean;
+  approved?: boolean;
 }
 
 interface KeyData {
@@ -209,7 +216,7 @@ function DurationPicker({ onSelect, onCancel }: { onSelect: (minutes: number) =>
 
   return (
     <div className="space-y-6">
-      <p className="text-sm text-slate-500">How long do you plan to use this classroom?</p>
+      <p className="text-sm text-slate-500">How long do you plan to use this room?</p>
       <div className="grid grid-cols-1 gap-3">
         {presets.map(p => (
           <button
@@ -243,7 +250,7 @@ function ExtensionPicker({ onSelect, onCancel }: { onSelect: (minutes: number) =
 
   return (
     <div className="space-y-6">
-      <p className="text-sm text-slate-500">Extend your classroom use by:</p>
+      <p className="text-sm text-slate-500">Extend your room use by:</p>
       <div className="grid grid-cols-2 gap-3">
         {presets.map(p => (
           <button
@@ -359,6 +366,7 @@ export default function App() {
   const [transactions, setTransactions] = useState<Transaction[]>([]);
   const [users, setUsers] = useState<UserProfile[]>([]);
   const [pendingTransaction, setPendingTransaction] = useState<CurrentTransaction | null>(null);
+  const lastPendingTxRef = useRef<CurrentTransaction | null>(null);
   const [rtdbKeys, setRtdbKeys] = useState<Record<string, any>>({});
   const [loading, setLoading] = useState(true);
   const [activeTab, setActiveTab] = useState('dashboard');
@@ -374,6 +382,7 @@ export default function App() {
 
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
+  const [showPassword, setShowPassword] = useState(false);
   const [name, setName] = useState('');
   const [isRegistering, setIsRegistering] = useState(false);
   const [authError, setAuthError] = useState<string | null>(null);
@@ -395,6 +404,7 @@ export default function App() {
 
   // Modals
   const [showBookingModal, setShowBookingModal] = useState<string | null>(null);
+  const [showEditBookingModal, setShowEditBookingModal] = useState<Booking | null>(null);
   const [showReportModal, setShowReportModal] = useState<string | null>(null);
   const [showAdminKeyModal, setShowAdminKeyModal] = useState<KeyData | null>(null);
   const [showDurationModal, setShowDurationModal] = useState<{ keyUid: string, keyId: string } | null>(null);
@@ -420,20 +430,38 @@ export default function App() {
 
   useEffect(() => {
     const unsubscribe = onAuthStateChanged(auth, async (firebaseUser) => {
-      setUser(firebaseUser);
       try {
         if (firebaseUser) {
           const userDoc = await getDoc(doc(db, 'users', firebaseUser.uid));
           if (userDoc.exists()) {
-            setProfile(userDoc.data() as UserProfile);
+            const data = userDoc.data() as UserProfile;
+            if (data.deleted) {
+              await signOut(auth);
+              setAuthError("Your account has been deleted by an administrator.");
+              setUser(null);
+              setProfile(null);
+            } else {
+              // Force admin and approved for frederickigang@gmail.com
+              if (firebaseUser.email === 'frederickigang@gmail.com' && (data.role !== 'admin' || !data.approved)) {
+                const updatedProfile = { ...data, role: 'admin' as const, approved: true };
+                await updateDoc(doc(db, 'users', firebaseUser.uid), { role: 'admin', approved: true });
+                setUser(firebaseUser);
+                setProfile(updatedProfile);
+              } else {
+                setUser(firebaseUser);
+                setProfile(data);
+              }
+            }
           } else {
+            setUser(firebaseUser);
             // Create profile for new user
             const newProfile: UserProfile = {
               uid: firebaseUser.uid,
               email: firebaseUser.email || '',
               displayName: firebaseUser.displayName || 'User',
               role: firebaseUser.email === 'frederickigang@gmail.com' ? 'admin' : 'user',
-              createdAt: Timestamp.now()
+              createdAt: Timestamp.now(),
+              approved: firebaseUser.email === 'frederickigang@gmail.com' ? true : false
             };
             await setDoc(doc(db, 'users', firebaseUser.uid), newProfile);
             setProfile(newProfile);
@@ -446,6 +474,7 @@ export default function App() {
             );
           }
         } else {
+          setUser(null);
           setProfile(null);
         }
       } catch (err) {
@@ -556,104 +585,146 @@ export default function App() {
 
   // --- RTDB to Firestore Sync ---
   useEffect(() => {
+    let timeout: NodeJS.Timeout;
+    if (pendingTransaction && pendingTransaction.isPending) {
+      lastPendingTxRef.current = pendingTransaction;
+    } else {
+      // Clear it after 5 seconds to avoid race conditions but prevent lingering
+      timeout = setTimeout(() => {
+        lastPendingTxRef.current = null;
+      }, 5000);
+    }
+    return () => clearTimeout(timeout);
+  }, [pendingTransaction]);
+
+  useEffect(() => {
     if (!isAuthReady || !user || !keys.length || Object.keys(rtdbKeys).length === 0) return;
 
     const syncRtdbToFirestore = async () => {
       for (const key of keys) {
         const rtdbKey = rtdbKeys[key.uid];
         if (rtdbKey) {
-          // If hardware updated status but not holder, try to infer from pending transaction
-          let inferredHolderId = rtdbKey.currentHolderId || null;
-          let inferredHolderName = rtdbKey.currentHolderName || null;
-
-          if (rtdbKey.status === 'checked_out' && !inferredHolderId) {
-            if (key.status === 'checked_out') {
-              // Key was already checked out, keep the existing holder
-              inferredHolderId = key.currentHolderId || null;
-              inferredHolderName = key.currentHolderName || null;
-            } else if (pendingTransaction && pendingTransaction.expectedUID === key.uid) {
-              // Key just became checked out, infer from pending transaction even if canceled
-              inferredHolderId = pendingTransaction.userId || null;
-              inferredHolderName = pendingTransaction.userName || null;
-            }
-          }
-
           // Check if Firestore needs update
           const needsUpdate = 
             rtdbKey.status !== key.status || 
-            inferredHolderId !== (key.currentHolderId || null) ||
-            inferredHolderName !== (key.currentHolderName || null) ||
+            (rtdbKey.status === 'checked_out' && key.currentHolderId === null && pendingTransaction?.expectedUID === key.uid) ||
             (rtdbKey.expectedReturnTime && (!key.expectedReturnTime || rtdbKey.expectedReturnTime !== key.expectedReturnTime.toMillis()));
 
           if (needsUpdate) {
             try {
-              const timestamp = Timestamp.now();
-              const updateData: any = {
-                status: rtdbKey.status,
-                currentHolderId: inferredHolderId,
-                currentHolderName: inferredHolderName,
-                lastUpdated: timestamp
-              };
+              await runTransaction(db, async (transaction) => {
+                const keyRef = doc(db, 'keys', key.id);
+                const keyDoc = await transaction.get(keyRef);
+                if (!keyDoc.exists()) return null;
+                
+                const currentKey = keyDoc.data();
+                
+                // If another client already updated the status, skip to avoid duplicate logs
+                if (currentKey.status === rtdbKey.status && currentKey.status !== key.status) {
+                  return null;
+                }
 
-              if (rtdbKey.expectedReturnTime) {
-                updateData.expectedReturnTime = Timestamp.fromMillis(rtdbKey.expectedReturnTime);
-              } else if (rtdbKey.status === 'available') {
-                updateData.expectedReturnTime = deleteField();
-              }
+                let inferredHolderId = rtdbKey.currentHolderId || null;
+                let inferredHolderName = rtdbKey.currentHolderName || null;
 
-              await updateDoc(doc(db, 'keys', key.id), updateData);
+                if (rtdbKey.status === 'checked_out' && !inferredHolderId) {
+                  if (currentKey.status === 'checked_out') {
+                    inferredHolderId = currentKey.currentHolderId || null;
+                    inferredHolderName = currentKey.currentHolderName || null;
+                  } else if (pendingTransaction && pendingTransaction.expectedUID === key.uid) {
+                    inferredHolderId = pendingTransaction.userId || null;
+                    inferredHolderName = pendingTransaction.userName || null;
+                  } else if (lastPendingTxRef.current && lastPendingTxRef.current.expectedUID === key.uid) {
+                    inferredHolderId = lastPendingTxRef.current.userId || null;
+                    inferredHolderName = lastPendingTxRef.current.userName || null;
+                  }
+                }
 
-              // Also log transaction if status changed
-              if (rtdbKey.status !== key.status) {
-                const transactionId = doc(collection(db, 'transactions')).id;
-                const txData: any = {
-                  id: transactionId,
-                  keyId: key.id,
-                  userId: inferredHolderId || user.uid,
-                  userName: inferredHolderName || profile?.displayName || 'Unknown',
-                  action: rtdbKey.status === 'checked_out' ? 'checkout' : 'return',
-                  timestamp: timestamp
+                const timestamp = Timestamp.now();
+                const updateData: any = {
+                  status: rtdbKey.status,
+                  currentHolderId: inferredHolderId,
+                  currentHolderName: inferredHolderName,
+                  lastUpdated: timestamp
                 };
 
-                if (rtdbKey.status === 'checked_out' && pendingTransaction?.durationMinutes) {
-                  txData.durationMinutes = pendingTransaction.durationMinutes;
+                if (rtdbKey.expectedReturnTime) {
+                  updateData.expectedReturnTime = Timestamp.fromMillis(rtdbKey.expectedReturnTime);
+                } else if (rtdbKey.status === 'available') {
+                  updateData.expectedReturnTime = deleteField();
                 }
 
-                await setDoc(doc(db, 'transactions', transactionId), txData);
+                transaction.update(keyRef, updateData);
 
-                // Notify users if key became available
-                if (rtdbKey.status === 'available') {
-                  const pendingBookings = bookings.filter(b => b.keyId === key.id && b.status === 'pending');
-                  for (const booking of pendingBookings) {
-                    await addNotification(
-                      booking.userId,
-                      `The key for ${key.name} is now available!`,
-                      'info'
-                    );
+                // Also log transaction if status changed
+                if (rtdbKey.status !== currentKey.status) {
+                  const transactionRef = doc(collection(db, 'transactions'));
+                  
+                  let txUserId = 'unknown';
+                  let txUserName = 'Unknown';
+                  
+                  if (rtdbKey.status === 'checked_out') {
+                    txUserId = inferredHolderId || 'unknown';
+                    txUserName = inferredHolderName || 'Unknown';
+                  } else if (rtdbKey.status === 'available' || rtdbKey.status === 'missing') {
+                    txUserId = currentKey.currentHolderId || 'unknown';
+                    txUserName = currentKey.currentHolderName || 'Unknown';
+                  }
+
+                  const txData: any = {
+                    id: transactionRef.id,
+                    keyId: key.id,
+                    userId: txUserId,
+                    userName: txUserName,
+                    action: rtdbKey.status === 'checked_out' ? 'checkout' : 'return',
+                    timestamp: timestamp
+                  };
+
+                  if (rtdbKey.status === 'checked_out' && pendingTransaction?.durationMinutes) {
+                    txData.durationMinutes = pendingTransaction.durationMinutes;
+                  }
+
+                  transaction.set(transactionRef, txData);
+                  return { statusChangedTo: rtdbKey.status, txUserId };
+                }
+                return null;
+              }).then(async (result) => {
+                if (result) {
+                  // Notify users if key became available
+                  if (result.statusChangedTo === 'available') {
+                    const pendingBookings = bookings.filter(b => b.keyId === key.id && b.status === 'pending');
+                    for (const booking of pendingBookings) {
+                      await addNotification(
+                        booking.userId,
+                        `The key for ${key.name} is now available!`,
+                        'info'
+                      );
+                    }
+                  }
+
+                  // Notify users if key became missing
+                  if (result.statusChangedTo === 'missing') {
+                    const affectedBookings = bookings.filter(b => b.keyId === key.id && (b.status === 'pending' || b.status === 'active'));
+                    for (const booking of affectedBookings) {
+                      await addNotification(
+                        booking.userId,
+                        `Alert: The key for ${key.name} has been marked as missing. Your booking may be affected.`,
+                        'warning'
+                      );
+                    }
+                  }
+
+                  // Clear current transaction if it was for this key
+                  if (pendingTransaction && pendingTransaction.expectedUID === key.uid) {
+                    await setRtdbValue(rtdbRef(rtdb, 'currentTransaction'), {
+                      action: 'none',
+                      expectedUID: 'none',
+                      isPending: false
+                    });
                   }
                 }
+              });
 
-                // Notify users if key became missing
-                if (rtdbKey.status === 'missing') {
-                  const affectedBookings = bookings.filter(b => b.keyId === key.id && (b.status === 'pending' || b.status === 'active'));
-                  for (const booking of affectedBookings) {
-                    await addNotification(
-                      booking.userId,
-                      `Alert: The key for ${key.name} has been marked as missing. Your booking may be affected.`,
-                      'warning'
-                    );
-                  }
-                }
-
-                // Clear current transaction if it was for this key
-                if (pendingTransaction && pendingTransaction.expectedUID === key.uid) {
-                  await setRtdbValue(rtdbRef(rtdb, 'currentTransaction'), {
-                    action: 'none',
-                    expectedUID: 'none',
-                    isPending: false
-                  });
-                }
-              }
             } catch (err) {
               console.error("Error syncing RTDB to Firestore:", err);
             }
@@ -683,6 +754,26 @@ export default function App() {
               `Warning: You have not returned the key for ${keys.find(k => k.id === booking.keyId)?.name}. Booking ID: ${booking.id}`,
               'warning'
             );
+          }
+        }
+      }
+
+      // Check pending bookings to notify when it's time
+      const pendingBookings = bookings.filter(b => b.userId === user.uid && b.status === 'pending');
+      for (const booking of pendingBookings) {
+        const timeUntilStart = booking.startTime.toMillis() - now.toMillis();
+        // If booking starts in less than 5 minutes or has already started (but not ended)
+        if (timeUntilStart <= 300000 && booking.endTime.toMillis() > now.toMillis()) {
+          const key = keys.find(k => k.id === booking.keyId);
+          if (key && key.status === 'available') {
+            const alreadyNotified = notifications.some(n => n.type === 'info' && n.message.includes(`take_key_${booking.id}`));
+            if (!alreadyNotified) {
+              await addNotification(
+                user.uid,
+                `It's time for your booking! You can now take the key for ${key.name}. [take_key_${booking.id}]`,
+                'info'
+              );
+            }
           }
         }
       }
@@ -728,7 +819,8 @@ export default function App() {
             email: userCredential.user.email || '',
             displayName: name,
             role: userCredential.user.email === 'frederickigang@gmail.com' ? 'admin' : 'user',
-            createdAt: Timestamp.now()
+            createdAt: Timestamp.now(),
+            approved: userCredential.user.email === 'frederickigang@gmail.com' ? true : false
           }, { merge: true });
           
           setProfile(prev => prev ? { ...prev, displayName: name } : null);
@@ -738,6 +830,19 @@ export default function App() {
       }
     } catch (err: any) {
       setAuthError(err.message || "Authentication failed.");
+    }
+  };
+
+  const handleForgotPassword = async () => {
+    if (!email) {
+      setAuthError("Please enter your email address to reset your password.");
+      return;
+    }
+    try {
+      await sendPasswordResetEmail(auth, email);
+      setAuthError("Password reset email sent. Please check your inbox.");
+    } catch (err: any) {
+      setAuthError(err.message || "Failed to send password reset email.");
     }
   };
 
@@ -842,12 +947,13 @@ export default function App() {
 
   const cancelTransaction = async () => {
     try {
+      lastPendingTxRef.current = null;
       await setRtdbValue(rtdbRef(rtdb, 'currentTransaction'), {
         action: 'none',
-        expectedUID: pendingTransaction?.expectedUID || 'none',
+        expectedUID: 'none',
         isPending: false,
-        userId: pendingTransaction?.userId || null,
-        userName: pendingTransaction?.userName || null
+        userId: null,
+        userName: null
       });
     } catch (err) {
       console.error("Error cancelling transaction:", err);
@@ -870,6 +976,29 @@ export default function App() {
       setShowBookingModal(null);
     } catch (err) {
       handleFirestoreError(err, OperationType.CREATE, 'bookings', setAsyncError);
+    }
+  };
+
+  const editBooking = async (id: string, startTime: Date, endTime: Date) => {
+    try {
+      await updateDoc(doc(db, 'bookings', id), {
+        startTime: Timestamp.fromDate(startTime),
+        endTime: Timestamp.fromDate(endTime)
+      });
+      setShowEditBookingModal(null);
+    } catch (err) {
+      handleFirestoreError(err, OperationType.UPDATE, `bookings/${id}`, setAsyncError);
+    }
+  };
+
+  const cancelBooking = async (id: string, userId: string) => {
+    if (profile?.role !== 'admin' && user?.uid !== userId) return;
+    if (window.confirm('Are you sure you want to cancel this booking?')) {
+      try {
+        await updateDoc(doc(db, 'bookings', id), { status: 'cancelled' });
+      } catch (err) {
+        handleFirestoreError(err, OperationType.UPDATE, `bookings/${id}`, setAsyncError);
+      }
     }
   };
 
@@ -1008,11 +1137,60 @@ export default function App() {
       alert("You cannot change your own role.");
       return;
     }
+    const targetUser = users.find(u => u.uid === targetUid);
+    if (targetUser?.email === 'frederickigang@gmail.com' && newRole !== 'admin') {
+      alert("This user is the primary administrator and cannot be demoted.");
+      return;
+    }
     try {
       await updateDoc(doc(db, 'users', targetUid), { role: newRole });
       addNotification(user!.uid, `User role updated to ${newRole}`, 'info');
     } catch (err) {
       handleFirestoreError(err, OperationType.UPDATE, `users/${targetUid}`, setAsyncError);
+    }
+  };
+
+  const deleteUser = async (targetUid: string) => {
+    if (!profile || profile.role !== 'admin') return;
+    if (targetUid === user?.uid) {
+      alert("You cannot delete your own account.");
+      return;
+    }
+    const targetUser = users.find(u => u.uid === targetUid);
+    if (targetUser?.email === 'frederickigang@gmail.com') {
+      alert("This user is the primary administrator and cannot be deleted.");
+      return;
+    }
+    if (window.confirm('Are you sure you want to delete this user? This action cannot be undone.')) {
+      try {
+        await updateDoc(doc(db, 'users', targetUid), { deleted: true });
+        addNotification(user!.uid, 'User deleted successfully', 'info');
+      } catch (err) {
+        handleFirestoreError(err, OperationType.UPDATE, `users/${targetUid}`, setAsyncError);
+      }
+    }
+  };
+
+  const approveUser = async (targetUid: string) => {
+    if (!profile || profile.role !== 'admin') return;
+    try {
+      await updateDoc(doc(db, 'users', targetUid), { approved: true });
+      await addNotification(targetUid, "Your account has been approved! You can now access the system.", 'info');
+      addNotification(user!.uid, 'User approved successfully', 'info');
+    } catch (err) {
+      handleFirestoreError(err, OperationType.UPDATE, `users/${targetUid}`, setAsyncError);
+    }
+  };
+
+  const adminResetPassword = async (email: string) => {
+    if (!profile || profile.role !== 'admin') return;
+    if (window.confirm(`Send password reset email to ${email}?`)) {
+      try {
+        await sendPasswordResetEmail(auth, email);
+        addNotification(user!.uid, `Password reset email sent to ${email}`, 'info');
+      } catch (err: any) {
+        alert(err.message || "Failed to send password reset email.");
+      }
     }
   };
 
@@ -1038,6 +1216,30 @@ export default function App() {
     );
   }
 
+  if (user && profile && !profile.approved) {
+    return (
+      <div className="min-h-screen bg-[#F8FAFC] flex flex-col items-center justify-center px-6">
+        <motion.div 
+          initial={{ opacity: 0, y: 20 }}
+          animate={{ opacity: 1, y: 0 }}
+          className="w-full max-w-sm bg-white rounded-3xl p-8 shadow-xl shadow-indigo-100 border border-slate-100 text-center"
+        >
+          <div className="bg-amber-100 w-16 h-16 rounded-2xl flex items-center justify-center mx-auto mb-6 shadow-lg shadow-amber-50">
+            <Clock className="w-8 h-8 text-amber-600" />
+          </div>
+          <h1 className="text-2xl font-bold text-slate-800 mb-2">Pending Approval</h1>
+          <p className="text-slate-500 mb-8">Your account is waiting for administrator approval. Please check back later.</p>
+          <button 
+            onClick={handleLogout}
+            className="w-full bg-slate-100 text-slate-600 py-3 rounded-xl font-bold hover:bg-slate-200 transition-all"
+          >
+            Sign Out
+          </button>
+        </motion.div>
+      </div>
+    );
+  }
+
   if (!user) {
     return (
       <div className="min-h-screen bg-[#F8FAFC] flex flex-col items-center justify-center px-6">
@@ -1050,7 +1252,7 @@ export default function App() {
             <KeyIcon className="w-8 h-8 text-white" />
           </div>
           <h1 className="text-2xl font-bold text-slate-800 mb-2">PolyKeyLock</h1>
-          <p className="text-slate-500 mb-8">Smart Classroom Key Management System</p>
+          <p className="text-slate-500 mb-8">Smart Key Cabinet System</p>
           
           <form onSubmit={handleEmailAuth} className="space-y-4 mb-6">
             {authError && <div className="p-3 bg-red-50 text-red-600 text-sm rounded-xl text-left">{authError}</div>}
@@ -1072,20 +1274,39 @@ export default function App() {
               className="w-full px-4 py-3 rounded-xl border border-slate-200 focus:border-indigo-500 focus:ring-2 focus:ring-indigo-200 outline-none transition-all"
               required
             />
-            <input
-              type="password"
-              placeholder="Password"
-              value={password}
-              onChange={e => setPassword(e.target.value)}
-              className="w-full px-4 py-3 rounded-xl border border-slate-200 focus:border-indigo-500 focus:ring-2 focus:ring-indigo-200 outline-none transition-all"
-              required
-            />
+            <div className="relative">
+              <input
+                type={showPassword ? "text" : "password"}
+                placeholder="Password"
+                value={password}
+                onChange={e => setPassword(e.target.value)}
+                className="w-full px-4 py-3 rounded-xl border border-slate-200 focus:border-indigo-500 focus:ring-2 focus:ring-indigo-200 outline-none transition-all pr-12"
+                required
+              />
+              <button
+                type="button"
+                onClick={() => setShowPassword(!showPassword)}
+                className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-600 p-1 transition-colors"
+                title={showPassword ? "Hide password" : "Show password"}
+              >
+                {showPassword ? <EyeOff className="w-5 h-5" /> : <Eye className="w-5 h-5" />}
+              </button>
+            </div>
             <button
               type="submit"
               className="w-full bg-indigo-600 text-white py-3 rounded-xl font-bold hover:bg-indigo-700 transition-all"
             >
               {isRegistering ? 'Create Account' : 'Sign In'}
             </button>
+            {!isRegistering && (
+              <button
+                type="button"
+                onClick={handleForgotPassword}
+                className="w-full text-sm text-indigo-600 font-medium hover:underline transition-all"
+              >
+                Forgot Password?
+              </button>
+            )}
           </form>
 
           <div className="flex items-center gap-4 mb-6">
@@ -1255,7 +1476,7 @@ export default function App() {
               )}>
                 {profile?.role}
               </span>
-              <span className="text-xs text-slate-400">• Classroom Access</span>
+              <span className="text-xs text-slate-400">• Room Access</span>
             </div>
           </div>
         </div>
@@ -1483,6 +1704,24 @@ export default function App() {
                       </div>
                     </div>
                     <div className="flex items-center gap-3">
+                      {booking.status === 'pending' && booking.userId === user?.uid && (
+                        <div className="flex items-center gap-1 mr-2">
+                          <button 
+                            onClick={() => setShowEditBookingModal(booking)}
+                            className="p-2 text-indigo-500 hover:bg-indigo-50 rounded-lg transition-colors"
+                            title="Edit Booking"
+                          >
+                            <Settings className="w-4 h-4" />
+                          </button>
+                          <button 
+                            onClick={() => cancelBooking(booking.id, booking.userId)}
+                            className="p-2 text-red-500 hover:bg-red-50 rounded-lg transition-colors"
+                            title="Cancel Booking"
+                          >
+                            <Trash2 className="w-4 h-4" />
+                          </button>
+                        </div>
+                      )}
                       {profile?.role === 'admin' && (
                         <div className="flex items-center gap-1 mr-2">
                           {booking.status === 'pending' && (
@@ -1726,12 +1965,12 @@ export default function App() {
               </div>
 
               <div className="space-y-4">
-                <h3 className="text-lg font-bold text-slate-800">Manage Admins</h3>
+                <h3 className="text-lg font-bold text-slate-800">Manage Users</h3>
                 <div className="bg-white rounded-3xl border border-slate-100 overflow-hidden">
-                  {users.map((u, i) => (
+                  {users.filter(u => !u.deleted).map((u, i, arr) => (
                     <div key={u.uid} className={cn(
                       "p-4 flex items-center justify-between",
-                      i !== users.length - 1 && "border-b border-slate-50"
+                      i !== arr.length - 1 && "border-b border-slate-50"
                     )}>
                       <div className="flex items-center gap-3">
                         <div className={cn(
@@ -1743,22 +1982,49 @@ export default function App() {
                         <div>
                           <p className="text-sm font-bold text-slate-800">{u.displayName}</p>
                           <p className="text-[10px] text-slate-400 uppercase tracking-widest font-bold">
-                            {u.role} • {u.email}
+                            {u.role} • {u.email} {!u.approved && '• PENDING'}
                           </p>
                         </div>
                       </div>
-                      {u.uid !== user?.uid && (
-                        <button 
-                          onClick={() => updateUserRole(u.uid, u.role === 'admin' ? 'user' : 'admin')}
-                          className={cn(
-                            "p-2 rounded-xl transition-all",
-                            u.role === 'admin' ? "text-red-500 hover:bg-red-50" : "text-indigo-600 hover:bg-indigo-50"
-                          )}
-                          title={u.role === 'admin' ? "Remove Admin" : "Make Admin"}
-                        >
-                          {u.role === 'admin' ? <UserMinus className="w-5 h-5" /> : <UserPlus className="w-5 h-5" />}
-                        </button>
-                      )}
+                      <div className="flex items-center gap-2">
+                        {!u.approved && (
+                          <button
+                            onClick={() => approveUser(u.uid)}
+                            className="p-2 text-green-600 hover:bg-green-50 rounded-xl transition-colors"
+                            title="Approve User"
+                          >
+                            <CheckCircle2 className="w-5 h-5" />
+                          </button>
+                        )}
+                        {u.uid !== user?.uid && (
+                          <>
+                            <button 
+                              onClick={() => adminResetPassword(u.email)}
+                              className="p-2 rounded-xl text-slate-400 hover:text-indigo-600 hover:bg-indigo-50 transition-all"
+                              title="Reset Password"
+                            >
+                              <KeyRound className="w-5 h-5" />
+                            </button>
+                            <button 
+                              onClick={() => updateUserRole(u.uid, u.role === 'admin' ? 'user' : 'admin')}
+                              className={cn(
+                                "p-2 rounded-xl transition-all",
+                                u.role === 'admin' ? "text-amber-500 hover:bg-amber-50" : "text-emerald-600 hover:bg-emerald-50"
+                              )}
+                              title={u.role === 'admin' ? "Remove Admin" : "Make Admin"}
+                            >
+                              {u.role === 'admin' ? <UserMinus className="w-5 h-5" /> : <UserPlus className="w-5 h-5" />}
+                            </button>
+                            <button 
+                              onClick={() => deleteUser(u.uid)}
+                              className="p-2 rounded-xl text-slate-400 hover:text-red-600 hover:bg-red-50 transition-all"
+                              title="Delete User"
+                            >
+                              <Trash2 className="w-5 h-5" />
+                            </button>
+                          </>
+                        )}
+                      </div>
                     </div>
                   ))}
                 </div>
@@ -1801,10 +2067,21 @@ export default function App() {
       {/* Modals */}
       <AnimatePresence>
         {showBookingModal && (
-          <Modal onClose={() => setShowBookingModal(null)} title="Book Classroom Key">
+          <Modal onClose={() => setShowBookingModal(null)} title="Book Room Key">
             <BookingForm 
               onSubmit={(start, end) => createBooking(showBookingModal, start, end)} 
               onCancel={() => setShowBookingModal(null)} 
+            />
+          </Modal>
+        )}
+
+        {showEditBookingModal && (
+          <Modal onClose={() => setShowEditBookingModal(null)} title="Edit Booking">
+            <BookingForm 
+              initialStart={showEditBookingModal.startTime.toDate()}
+              initialEnd={showEditBookingModal.endTime.toDate()}
+              onSubmit={(start, end) => editBooking(showEditBookingModal.id, start, end)} 
+              onCancel={() => setShowEditBookingModal(null)} 
             />
           </Modal>
         )}
@@ -1969,9 +2246,12 @@ function Modal({ children, onClose, title }: { children: React.ReactNode, onClos
   );
 }
 
-function BookingForm({ onSubmit, onCancel }: { onSubmit: (start: Date, end: Date) => void, onCancel: () => void }) {
-  const [start, setStart] = useState('');
-  const [end, setEnd] = useState('');
+function BookingForm({ onSubmit, onCancel, initialStart, initialEnd }: { onSubmit: (start: Date, end: Date) => void, onCancel: () => void, initialStart?: Date, initialEnd?: Date }) {
+  const formatForInput = (date: Date) => {
+    return new Date(date.getTime() - date.getTimezoneOffset() * 60000).toISOString().slice(0, 16);
+  };
+  const [start, setStart] = useState(initialStart ? formatForInput(initialStart) : '');
+  const [end, setEnd] = useState(initialEnd ? formatForInput(initialEnd) : '');
 
   return (
     <div className="space-y-4">
