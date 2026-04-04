@@ -132,6 +132,7 @@ interface CurrentTransaction {
   userId?: string;
   userName?: string;
   durationMinutes?: number;
+  timestamp?: number;
 }
 
 interface Booking {
@@ -588,6 +589,35 @@ export default function App() {
     let timeout: NodeJS.Timeout;
     if (pendingTransaction && pendingTransaction.isPending) {
       lastPendingTxRef.current = pendingTransaction;
+      
+      // Auto-cancel if it's our transaction and it's been pending for more than 60 seconds
+      if (pendingTransaction.userId === user?.uid && pendingTransaction.timestamp) {
+        const age = Date.now() - pendingTransaction.timestamp;
+        
+        const doCancel = async () => {
+          try {
+            lastPendingTxRef.current = null;
+            await setRtdbValue(rtdbRef(rtdb, 'currentTransaction'), {
+              action: 'none',
+              expectedUID: 'none',
+              isPending: false,
+              userId: null,
+              userName: null,
+              timestamp: Date.now()
+            });
+          } catch (err) {
+            console.error("Error auto-cancelling transaction:", err);
+          }
+        };
+
+        if (age < 60000) {
+          timeout = setTimeout(() => {
+            doCancel();
+          }, 60000 - age);
+        } else {
+          doCancel();
+        }
+      }
     } else {
       // Clear it after 5 seconds to avoid race conditions but prevent lingering
       timeout = setTimeout(() => {
@@ -595,7 +625,7 @@ export default function App() {
       }, 5000);
     }
     return () => clearTimeout(timeout);
-  }, [pendingTransaction]);
+  }, [pendingTransaction, user?.uid]);
 
   useEffect(() => {
     if (!isAuthReady || !user || !keys.length || Object.keys(rtdbKeys).length === 0) return;
@@ -605,8 +635,14 @@ export default function App() {
         const rtdbKey = rtdbKeys[key.uid];
         if (rtdbKey) {
           // Check if Firestore needs update
+          const isRecentCheckout = lastPendingTxRef.current?.expectedUID === key.uid && 
+                                   lastPendingTxRef.current?.action === 'checkout' && 
+                                   lastPendingTxRef.current?.timestamp && 
+                                   (Date.now() - lastPendingTxRef.current.timestamp < 60000);
+
           const needsUpdate = 
             rtdbKey.status !== key.status || 
+            (rtdbKey.status === 'checked_out' && isRecentCheckout && key.currentHolderId !== lastPendingTxRef.current?.userId) ||
             (rtdbKey.status === 'checked_out' && key.currentHolderId === null && pendingTransaction?.expectedUID === key.uid) ||
             (rtdbKey.expectedReturnTime && (!key.expectedReturnTime || rtdbKey.expectedReturnTime !== key.expectedReturnTime.toMillis()));
 
@@ -619,25 +655,33 @@ export default function App() {
                 
                 const currentKey = keyDoc.data();
                 
-                // If another client already updated the status, skip to avoid duplicate logs
-                if (currentKey.status === rtdbKey.status && currentKey.status !== key.status) {
-                  return null;
-                }
-
                 let inferredHolderId = rtdbKey.currentHolderId || null;
                 let inferredHolderName = rtdbKey.currentHolderName || null;
 
+                // If another client already updated the status and holder, skip to avoid duplicate logs
+                if (currentKey.status === rtdbKey.status && currentKey.currentHolderId === inferredHolderId && currentKey.status !== key.status) {
+                  return null;
+                }
+
                 if (rtdbKey.status === 'checked_out' && !inferredHolderId) {
-                  if (currentKey.status === 'checked_out') {
+                  const isRecentLast = lastPendingTxRef.current && lastPendingTxRef.current.expectedUID === key.uid && lastPendingTxRef.current.timestamp && (Date.now() - lastPendingTxRef.current.timestamp < 60000);
+                  const isRecentPending = pendingTransaction && pendingTransaction.expectedUID === key.uid && pendingTransaction.timestamp && (Date.now() - pendingTransaction.timestamp < 60000);
+
+                  if (isRecentLast) {
+                    inferredHolderId = lastPendingTxRef.current!.userId || null;
+                    inferredHolderName = lastPendingTxRef.current!.userName || null;
+                  } else if (isRecentPending) {
+                    inferredHolderId = pendingTransaction!.userId || null;
+                    inferredHolderName = pendingTransaction!.userName || null;
+                  } else if (currentKey.status === 'checked_out') {
                     inferredHolderId = currentKey.currentHolderId || null;
                     inferredHolderName = currentKey.currentHolderName || null;
-                  } else if (pendingTransaction && pendingTransaction.expectedUID === key.uid) {
-                    inferredHolderId = pendingTransaction.userId || null;
-                    inferredHolderName = pendingTransaction.userName || null;
-                  } else if (lastPendingTxRef.current && lastPendingTxRef.current.expectedUID === key.uid) {
-                    inferredHolderId = lastPendingTxRef.current.userId || null;
-                    inferredHolderName = lastPendingTxRef.current.userName || null;
                   }
+                }
+
+                // Double check skip logic with the newly inferred holder
+                if (currentKey.status === rtdbKey.status && currentKey.currentHolderId === inferredHolderId && currentKey.status !== key.status) {
+                  return null;
                 }
 
                 const timestamp = Timestamp.now();
@@ -880,7 +924,8 @@ export default function App() {
         expectedUID: keyUid,
         isPending: true,
         userId: user.uid,
-        userName: profile.displayName
+        userName: profile.displayName,
+        timestamp: Date.now()
       });
     } catch (err) {
       console.error("Error starting transaction:", err);
@@ -900,7 +945,8 @@ export default function App() {
         userId: user.uid,
         userName: profile.displayName,
         durationMinutes,
-        expectedReturnTime
+        expectedReturnTime,
+        timestamp: Date.now()
       });
 
       // Also update the key in RTDB immediately so hardware knows the expected return
@@ -953,7 +999,8 @@ export default function App() {
         expectedUID: 'none',
         isPending: false,
         userId: null,
-        userName: null
+        userName: null,
+        timestamp: Date.now()
       });
     } catch (err) {
       console.error("Error cancelling transaction:", err);
@@ -1164,6 +1211,37 @@ export default function App() {
     if (window.confirm('Are you sure you want to delete this user? This action cannot be undone.')) {
       try {
         await updateDoc(doc(db, 'users', targetUid), { deleted: true });
+        
+        // Auto-return any keys held by this user
+        const heldKeys = keys.filter(k => k.currentHolderId === targetUid);
+        for (const k of heldKeys) {
+          await updateDoc(doc(db, 'keys', k.id), {
+            status: 'available',
+            currentHolderId: null,
+            currentHolderName: null,
+            lastUpdated: Timestamp.now(),
+            expectedReturnTime: deleteField()
+          });
+          await setRtdbValue(rtdbRef(rtdb, `keys/${k.uid}`), {
+            id: k.id,
+            name: k.name,
+            status: 'available',
+            currentHolderId: null,
+            currentHolderName: null
+          });
+          
+          // Log return transaction
+          const transactionRef = doc(collection(db, 'transactions'));
+          await setDoc(transactionRef, {
+            id: transactionRef.id,
+            keyId: k.id,
+            userId: targetUid,
+            userName: targetUser?.displayName || 'Unknown',
+            action: 'return',
+            timestamp: Timestamp.now()
+          });
+        }
+
         addNotification(user!.uid, 'User deleted successfully', 'info');
       } catch (err) {
         handleFirestoreError(err, OperationType.UPDATE, `users/${targetUid}`, setAsyncError);
