@@ -69,7 +69,8 @@ import {
   UserPlus,
   KeyRound,
   Eye,
-  EyeOff
+  EyeOff,
+  DoorOpen
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { cn } from './lib/utils';
@@ -171,7 +172,7 @@ interface Transaction {
   keyId: string;
   userId: string;
   userName: string;
-  action: 'checkout' | 'return';
+  action: 'checkout' | 'return' | 'cabinet_opened' | 'clicked_take_key' | 'clicked_return_key';
   timestamp: Timestamp;
   durationMinutes?: number;
 }
@@ -374,6 +375,7 @@ export default function App() {
   const [isAuthReady, setIsAuthReady] = useState(false);
   const [asyncError, setAsyncError] = useState<any>(null);
   const [historyDate, setHistoryDate] = useState<string>(new Date().toISOString().split('T')[0]);
+  const [historyActionFilter, setHistoryActionFilter] = useState<'all' | 'keys' | 'door'>('all');
   const [showNotifications, setShowNotifications] = useState(false);
   const [notificationPermission, setNotificationPermission] = useState<NotificationPermission>(
     typeof window !== 'undefined' && 'Notification' in window ? Notification.permission : 'default'
@@ -907,6 +909,24 @@ export default function App() {
     }
   };
 
+  const logUserAction = async (keyUid: string, actionType: 'cabinet_opened' | 'clicked_take_key' | 'clicked_return_key') => {
+    if (!user || !profile) return;
+    try {
+      const key = keys.find(k => k.uid === keyUid);
+      const transactionRef = doc(collection(db, 'transactions'));
+      await setDoc(transactionRef, {
+        id: transactionRef.id,
+        keyId: key ? key.id : 'unknown',
+        userId: user.uid,
+        userName: profile.displayName,
+        action: actionType,
+        timestamp: Timestamp.now()
+      });
+    } catch (err) {
+      console.error(`Error logging action ${actionType}:`, err);
+    }
+  };
+
   const startTransaction = async (keyUid: string, action: 'checkout' | 'return') => {
     if (!user || !profile) return;
     
@@ -914,6 +934,7 @@ export default function App() {
       const key = keys.find(k => k.uid === keyUid);
       if (key) {
         setShowDurationModal({ keyUid, keyId: key.id });
+        await logUserAction(keyUid, 'clicked_take_key');
       }
       return;
     }
@@ -927,6 +948,8 @@ export default function App() {
         userName: profile.displayName,
         timestamp: Date.now()
       });
+      await logUserAction(keyUid, 'clicked_return_key');
+      await logUserAction(keyUid, 'cabinet_opened');
     } catch (err) {
       console.error("Error starting transaction:", err);
     }
@@ -953,6 +976,8 @@ export default function App() {
       await updateRtdbValue(rtdbRef(rtdb, `keys/${showDurationModal.keyUid}`), {
         expectedReturnTime
       });
+
+      await logUserAction(showDurationModal.keyUid, 'cabinet_opened');
 
       setShowDurationModal(null);
     } catch (err) {
@@ -1844,7 +1869,27 @@ export default function App() {
             >
               <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
                 <h3 className="text-lg font-bold text-slate-800">Key Usage History</h3>
-                <div className="flex items-center gap-3">
+                <div className="flex items-center gap-3 flex-wrap">
+                  <div className="flex bg-slate-100 p-1 rounded-xl">
+                    <button 
+                      onClick={() => setHistoryActionFilter('all')}
+                      className={cn("px-3 py-1.5 text-xs font-bold rounded-lg transition-all", historyActionFilter === 'all' ? "bg-white text-slate-800 shadow-sm" : "text-slate-500 hover:text-slate-700")}
+                    >
+                      All
+                    </button>
+                    <button 
+                      onClick={() => setHistoryActionFilter('keys')}
+                      className={cn("px-3 py-1.5 text-xs font-bold rounded-lg transition-all", historyActionFilter === 'keys' ? "bg-white text-slate-800 shadow-sm" : "text-slate-500 hover:text-slate-700")}
+                    >
+                      Keys
+                    </button>
+                    <button 
+                      onClick={() => setHistoryActionFilter('door')}
+                      className={cn("px-3 py-1.5 text-xs font-bold rounded-lg transition-all", historyActionFilter === 'door' ? "bg-white text-slate-800 shadow-sm" : "text-slate-500 hover:text-slate-700")}
+                    >
+                      Open Door
+                    </button>
+                  </div>
                   <div className="relative">
                     <input 
                       type="date" 
@@ -1863,7 +1908,13 @@ export default function App() {
               {keys.map(key => {
                 const keyTransactions = transactions.filter(t => {
                   const tDate = t.timestamp.toDate().toISOString().split('T')[0];
-                  return t.keyId === key.id && tDate === historyDate;
+                  const matchesDate = tDate === historyDate;
+                  const matchesKey = t.keyId === key.id;
+                  const matchesAction = 
+                    historyActionFilter === 'all' ? true :
+                    historyActionFilter === 'keys' ? (t.action === 'checkout' || t.action === 'return') :
+                    (t.action === 'cabinet_opened' || t.action === 'clicked_take_key' || t.action === 'clicked_return_key');
+                  return matchesKey && matchesDate && matchesAction;
                 });
                 if (keyTransactions.length === 0) return null;
 
@@ -1881,15 +1932,21 @@ export default function App() {
 
                     <div className="space-y-4">
                       {keyTransactions.map((t, idx) => (
-                        <div key={t.id} className="flex gap-4 items-start relative">
+                        <div key={`${t.id}-${idx}`} className="flex gap-4 items-start relative">
                           {idx !== keyTransactions.length - 1 && (
                             <div className="absolute left-[11px] top-6 bottom-[-16px] w-[2px] bg-slate-50" />
                           )}
                           <div className={cn(
                             "w-6 h-6 rounded-full flex items-center justify-center shrink-0 z-10",
-                            t.action === 'checkout' ? "bg-indigo-50 text-indigo-600" : "bg-emerald-50 text-emerald-600"
+                            t.action === 'checkout' ? "bg-indigo-50 text-indigo-600" : 
+                            t.action === 'return' ? "bg-emerald-50 text-emerald-600" :
+                            t.action === 'cabinet_opened' ? "bg-amber-50 text-amber-600" :
+                            "bg-slate-100 text-slate-500"
                           )}>
-                            {t.action === 'checkout' ? <ArrowUpRight className="w-3 h-3" /> : <ArrowDownLeft className="w-3 h-3" />}
+                            {t.action === 'checkout' ? <ArrowUpRight className="w-3 h-3" /> : 
+                             t.action === 'return' ? <ArrowDownLeft className="w-3 h-3" /> :
+                             t.action === 'cabinet_opened' ? <DoorOpen className="w-3 h-3" /> :
+                             <Info className="w-3 h-3" />}
                           </div>
                           <div className="flex-1 min-w-0">
                             <div className="flex justify-between items-start">
@@ -1898,7 +1955,7 @@ export default function App() {
                               </p>
                               <div className="flex items-center gap-2">
                                 <span className="text-[10px] text-slate-400 font-medium shrink-0">
-                                  {t.timestamp.toDate().toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })}
+                                  {t.timestamp.toDate().toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit', second: '2-digit' })}
                                 </span>
                                 {profile?.role === 'admin' && (
                                   <button 
@@ -1912,7 +1969,11 @@ export default function App() {
                               </div>
                             </div>
                             <p className="text-xs text-slate-500 mt-0.5">
-                              {t.action === 'checkout' ? 'Took the key' : 'Returned the key'}
+                              {t.action === 'checkout' ? 'Took the key' : 
+                               t.action === 'return' ? 'Returned the key' : 
+                               t.action === 'cabinet_opened' ? 'Opened the cabinet' :
+                               t.action === 'clicked_take_key' ? 'Clicked Take Key' :
+                               'Clicked Return Key'}
                             </p>
                           </div>
                         </div>
@@ -2112,26 +2173,32 @@ export default function App() {
                 <h3 className="text-lg font-bold text-slate-800">Recent Transactions</h3>
                 <div className="bg-white rounded-3xl border border-slate-100 overflow-hidden">
                   {transactions.map((tx, i) => (
-                    <div key={tx.id} className={cn(
+                    <div key={`${tx.id}-${i}`} className={cn(
                       "p-4 flex items-center justify-between",
                       i !== transactions.length - 1 && "border-b border-slate-50"
                     )}>
                       <div className="flex items-center gap-3">
                         <div className={cn(
                           "p-2 rounded-lg",
-                          tx.action === 'checkout' ? "bg-amber-50 text-amber-600" : "bg-emerald-50 text-emerald-600"
+                          tx.action === 'checkout' ? "bg-amber-50 text-amber-600" : 
+                          tx.action === 'return' ? "bg-emerald-50 text-emerald-600" :
+                          tx.action === 'cabinet_opened' ? "bg-blue-50 text-blue-600" :
+                          "bg-slate-100 text-slate-500"
                         )}>
-                          {tx.action === 'checkout' ? <Unlock className="w-4 h-4" /> : <Lock className="w-4 h-4" />}
+                          {tx.action === 'checkout' ? <Unlock className="w-4 h-4" /> : 
+                           tx.action === 'return' ? <Lock className="w-4 h-4" /> :
+                           tx.action === 'cabinet_opened' ? <DoorOpen className="w-4 h-4" /> :
+                           <Info className="w-4 h-4" />}
                         </div>
                         <div>
                           <p className="text-sm font-bold text-slate-800">{tx.userName}</p>
                           <p className="text-[10px] text-slate-400 uppercase tracking-widest font-bold">
-                            {tx.action} • {keys.find(k => k.id === tx.keyId)?.name}
+                            {tx.action.replace(/_/g, ' ')} • {keys.find(k => k.id === tx.keyId)?.name || 'Unknown'}
                           </p>
                         </div>
                       </div>
                       <span className="text-[10px] text-slate-400 font-medium">
-                        {tx.timestamp.toDate().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+                        {tx.timestamp.toDate().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })}
                       </span>
                     </div>
                   ))}

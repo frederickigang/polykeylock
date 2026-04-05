@@ -86,7 +86,7 @@ service cloud.firestore {
       return isAuthenticated() &&
         ((exists(/databases/$(database)/documents/users/$(request.auth.uid)) && 
           get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role == 'admin') ||
-          (request.auth.token.email == "frederickigang@gmail.com"));
+          ('email' in request.auth.token && request.auth.token.email == "frederickigang@gmail.com"));
     }
 
     function isValidUser(data) {
@@ -106,7 +106,9 @@ service cloud.firestore {
              data.name is string && data.name.size() > 0 && data.name.size() < 100 &&
              data.status in ['available', 'checked_out', 'missing'] &&
              data.lastUpdated is timestamp &&
-             (!('expectedReturnTime' in data) || data.expectedReturnTime is timestamp);
+             (!('expectedReturnTime' in data) || data.expectedReturnTime == null || data.expectedReturnTime is timestamp) &&
+             (!('currentHolderId' in data) || data.currentHolderId == null || data.currentHolderId is string) &&
+             (!('currentHolderName' in data) || data.currentHolderName == null || data.currentHolderName is string);
     }
 
     function isValidBooking(data) {
@@ -148,7 +150,7 @@ service cloud.firestore {
              data.keyId is string && data.keyId.size() > 0 &&
              data.userId is string && data.userId.size() > 0 &&
              data.userName is string && data.userName.size() > 0 &&
-             data.action in ['checkout', 'return'] &&
+             data.action in ['checkout', 'return', 'cabinet_opened', 'clicked_take_key', 'clicked_return_key'] &&
              data.timestamp is timestamp &&
              (!('durationMinutes' in data) || data.durationMinutes is int);
     }
@@ -161,7 +163,7 @@ service cloud.firestore {
       allow read: if isAuthenticated() && (isOwner(uid) || isAdmin());
       allow create: if isAuthenticated() && isValidUser(request.resource.data) && (isOwner(uid) || isAdmin());
       allow update: if isAuthenticated() && isValidUser(request.resource.data) && (
-        (isAdmin() && (uid != request.auth.uid || request.resource.data.role == resource.data.role || request.auth.token.email == "frederickigang@gmail.com")) ||
+        (isAdmin() && (uid != request.auth.uid || request.resource.data.role == resource.data.role || ('email' in request.auth.token && request.auth.token.email == "frederickigang@gmail.com"))) ||
         (isOwner(uid) && request.resource.data.role == resource.data.role)
       );
       allow delete: if isAdmin() && uid != request.auth.uid;
@@ -170,7 +172,7 @@ service cloud.firestore {
     match /keys/{keyId} {
       allow read: if isAuthenticated();
       allow create: if isAdmin() && isValidKey(request.resource.data);
-      allow update: if isAuthenticated() && isValidKey(request.resource.data) && (isAdmin() || (request.resource.data.diff(resource.data).affectedKeys().hasOnly(['status', 'currentHolderId', 'currentHolderName', 'lastUpdated'])));
+      allow update: if isAuthenticated() && isValidKey(request.resource.data) && (isAdmin() || (request.resource.data.diff(resource.data).affectedKeys().hasOnly(['status', 'currentHolderId', 'currentHolderName', 'lastUpdated', 'expectedReturnTime'])));
       allow delete: if isAdmin();
     }
 
@@ -197,7 +199,7 @@ service cloud.firestore {
 
     match /transactions/{transactionId} {
       allow read: if isAuthenticated();
-      allow create: if isAuthenticated() && isValidTransaction(request.resource.data) && (isOwner(request.resource.data.userId) || isAdmin());
+      allow create: if isAuthenticated() && isValidTransaction(request.resource.data);
       allow update: if false; // Transactions are immutable
       allow delete: if isAdmin();
     }
